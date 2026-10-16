@@ -1,16 +1,24 @@
 # ForceOneExplorerWindow
 
+[中文](#中文) | [English](#english)
+
+---
+
+<a id="中文"></a>
+
+## 中文
+
 Windows 11 资源管理器多窗口自动合并为单窗口多标签页的 AutoHotkey v2 脚本（[1explorer.ahk](1explorer.ahk)）。
 
 基于 Reddit 上的[原始版本](https://www.reddit.com/r/AutoHotkey/comments/1fvsm2y/force_windows_11_to_open_file_explorer_in_new_tab/)，针对中文系统和控制面板窗口做了大量修正。
 
-## 用法
+### 用法
 
 1. 安装 [AutoHotkey v2](https://www.autohotkey.com/)。
 2. 双击 `1explorer.ahk` 运行；如需开机自启，放入 `shell:startup` 文件夹。
 3. 运行后：新打开的资源管理器窗口会自动合并为第一个窗口的标签页。
 
-## 工作原理
+### 工作原理
 
 通过 `SetWinEventHook` 监听 `CabinetWClass`（资源管理器窗口）的系统事件：
 
@@ -27,21 +35,21 @@ Windows 11 资源管理器多窗口自动合并为单窗口多标签页的 AutoH
 3. `OpenInNewTab` 向主窗口发送 `WM_COMMAND 0xA21B` 新建标签页，再用 `IWebBrowser2.Navigate2` 导航到目标路径：
    - 普通文件路径 → 直接 `Navigate2(path)`；
    - 虚拟文件夹（`::{GUID}`，含 `::{父}\::{子}` 复合路径）→ `SHParseDisplayName` 解析为 PIDL，包装成 `VT_ARRAY|VT_UI1` 的 VARIANT 后 `Navigate2`。
-4. **弹窗检测**：导航后等 1 秒对比窗口列表快照。某些页（如"管理存储空间"）无法原地导航，系统会另外弹出一个独立窗口——检测到新窗口即判定该页不可合并。
-5. **宽限确认**：合并看似成功也不立即关闭原窗口，而是等 2 秒（`PendingMerges` + `FinalizeMerge`）。期间若有同路径新窗口迟到弹出，则关闭弹出的复制品、恢复**原来的 Explorer 窗口**（避免窗口"跑到控制面板"图标下）；确认无弹窗才关闭原窗口完成合并。
+4. **弹窗检测**：导航后等 1 秒对比窗口列表快照。某些页（如“管理存储空间”）无法原地导航，系统会另外弹出一个独立窗口——检测到新窗口即判定该页不可合并。
+5. **宽限确认**：合并看似成功也不立即关闭原窗口，而是等 2 秒（`PendingMerges` + `FinalizeMerge`）。期间若有同路径新窗口迟到弹出，则关闭弹出的复制品、恢复**原来的 Explorer 窗口**（避免窗口“跑到控制面板”图标下）；确认无弹窗才关闭原窗口完成合并。
 
 任何一步失败（取不到路径、解析失败、导航失败、弹出新窗口）都会恢复原窗口显示并记入忽略列表——**不报错、不丢窗口**。
 
-## 控制面板页的处理策略（三层）
+### 控制面板页的处理策略（三层）
 
-判断一律基于**路径**而非窗口文字——窗口文字在 `EVENT_OBJECT_SHOW` 时尚未填充，存在时序竞争；且中文系统显示文本不同。附带好处：文件夹名称里含"控制面板"也能正常合并。
+判断一律基于**路径**而非窗口文字——窗口文字在 `EVENT_OBJECT_SHOW` 时尚未填充，存在时序竞争；且中文系统显示文本不同。附带好处：文件夹名称里含“控制面板”也能正常合并。
 
 1. **控制面板主页 / 所有控制面板项**：完整路径排除（`::{26EE0668-…}`、`::{21EC2020-…}`），保持独立窗口。
-2. **已知"导航会弹新窗口"的页**：按**末尾 CLSID** 匹配直接跳过（入口不同，复合路径的父 GUID 不同，故不匹配完整路径）。目前名单：
+2. **已知“导航会弹新窗口”的页**：按**末尾 CLSID** 匹配直接跳过（入口不同，复合路径的父 GUID 不同，故不匹配完整路径）。目前名单：
    - `{F942C606-0914-47AB-BE56-1321B8035096}` 管理存储空间
 3. **未知弹窗页**：运行时自动识别（第 4 步弹窗检测），记入 `BadPaths`，本次运行内再次打开时直接跳过。
 
-### 如何添加新的已知弹窗页
+#### 如何添加新的已知弹窗页
 
 发现某个控制面板页不能合并时，先保持该窗口打开，用 PowerShell 查询其路径：
 
@@ -57,16 +65,93 @@ Windows 11 资源管理器多窗口自动合并为单窗口多标签页的 AutoH
 Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ControlPanel\NameSpace' | ForEach-Object { $guid = $_.PSChildName; $name = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\CLSID\$guid" -ErrorAction SilentlyContinue).'(default)'; "$guid  $name" }
 ```
 
-## 已知限制
+### 已知限制
 
-- 首次遇到某个未知弹窗页时，主窗口会多出一个空白"主页"标签页，需手动关闭；第二次打开该页起不再出现。
+- 首次遇到某个未知弹窗页时，主窗口会多出一个空白“主页”标签页，需手动关闭；第二次打开该页起不再出现。
 - `BadPaths`（运行时自动识别的名单）只在本次运行有效，重启脚本后需重新识别一次；常遇到的页建议按上节方法加入 `knownBad`。
-- 合并成功后的 2 秒宽限期内，如果用户手动再次打开**同一路径**的窗口，可能被误判为"弹窗"而关闭并把该路径标记为不可合并（极少见，重启脚本恢复）。
+- 合并成功后的 2 秒宽限期内，如果用户手动再次打开**同一路径**的窗口，可能被误判为“弹窗”而关闭并把该路径标记为不可合并（极少见，重启脚本恢复）。
 - 若第一个打开的窗口本身就是控制面板主页，`CheckFirstWindow` 会将其降级为独立窗口，后续文件夹窗口另立主窗口。
 
-## 关键实现
+### 关键实现
 
 - 隐藏方式用 `WinSetTransparent(0)` 而非隐藏窗口，规避 `DetectHiddenWindows` 的干扰。
 - `WaitForSameWindowCount` 等待 `Shell.Application.Windows` 数量与标签控件数量一致（忽略已排除窗口），保证 `GetPath`/`OpenInNewTab` 按索引取到正确的 shell 窗口。
 - `MergeLock` 保证一次只合并一个窗口——弹窗检测依赖窗口列表快照，并发合并会互相干扰。
 - 原窗口关闭前始终处于透明隐藏状态，因此 1 秒弹窗检测和 2 秒宽限期用户均无感知。
+
+---
+
+<a id="english"></a>
+
+## English
+
+An AutoHotkey v2 script that merges multiple Windows 11 File Explorer windows into a single window with multiple tabs ([1explorer.ahk](1explorer.ahk)).
+
+Based on the [original version](https://www.reddit.com/r/AutoHotkey/comments/1fvsm2y/force_windows_11_to_open_file_explorer_in_new_tab/) from Reddit, with extensive fixes for non-English (Chinese) systems and Control Panel windows.
+
+### Usage
+
+1. Install [AutoHotkey v2](https://www.autohotkey.com/).
+2. Double-click `1explorer.ahk` to run it. To start it automatically at login, place it in your `shell:startup` folder.
+3. Once running: newly opened File Explorer windows are automatically merged as tabs into the first window.
+
+### How It Works
+
+It listens for system events on `CabinetWClass` (File Explorer windows) via `SetWinEventHook`:
+
+| Event | Handling |
+|---|---|
+| `EVENT_OBJECT_CREATE` | Makes the new window fully transparent (visually hidden) as early as possible to avoid flicker |
+| `EVENT_OBJECT_SHOW` | The first window becomes the main window `FirstWindow`; other windows enter the `MergeWindow` flow after a delay |
+| `EVENT_OBJECT_DESTROY` | Cleans up the ignore list |
+
+The `MergeWindow` flow:
+
+1. `GetPath` obtains the window's current path via `Shell.Application.Windows` + `IShellBrowser` (with retries while waiting for COM to become ready).
+2. `IsExcludedPath` decides whether the path cannot be merged (see the next section).
+3. `OpenInNewTab` sends `WM_COMMAND 0xA21B` to the main window to open a new tab, then navigates it to the target path via `IWebBrowser2.Navigate2`:
+   - Regular file paths → `Navigate2(path)` directly;
+   - Virtual folders (`::{GUID}`, including composite paths like `::{parent}\::{child}`) → `SHParseDisplayName` resolves them into a PIDL, which is wrapped into a `VT_ARRAY|VT_UI1` VARIANT before calling `Navigate2`.
+4. **Popup detection**: after navigating, wait 1 second and compare the window-list snapshot. Some pages (such as "Manage Storage Spaces") cannot be navigated in place — Windows instead pops up a separate window. Any new window is treated as proof that the page cannot be merged.
+5. **Grace-period confirmation**: even when the merge appears to succeed, the original window is not closed immediately. It waits 2 seconds (`PendingMerges` + `FinalizeMerge`). If a new window with the same path appears late, the duplicate is closed and the **original Explorer window** is restored (so the window never "jumps" under the Control Panel icon); the original window is closed only after the grace period confirms no popup.
+
+If any step fails (path unavailable, parse failure, navigation failure, popup detected), the original window is restored and added to the ignore list — **no errors, no lost windows**.
+
+### Control Panel Pages — Three-Tier Strategy
+
+All decisions are based on **paths**, never on window text. Window text is not yet populated when `EVENT_OBJECT_SHOW` fires (a race condition), and the displayed text differs on Chinese systems. A side benefit: folders whose names contain "Control Panel" now merge normally.
+
+1. **Control Panel home / All Control Panel Items**: excluded by full path (`::{26EE0668-…}`, `::{21EC2020-…}`); they remain standalone windows.
+2. **Known pages that pop up a new window**: matched by their **trailing CLSID** and skipped directly (the parent GUID in a composite path differs depending on the entry point, so full-path matching is not used). Current list:
+   - `{F942C606-0914-47AB-BE56-1321B8035096}` Manage Storage Spaces
+3. **Unknown popup pages**: detected automatically at runtime (step 4 above) and recorded in `BadPaths`; opening the same page again within the current session skips it directly.
+
+#### Adding a New Known Popup Page
+
+When you find a Control Panel page that cannot be merged, keep that window open and query its path with PowerShell:
+
+```powershell
+(New-Object -ComObject Shell.Application).Windows() | ForEach-Object { $_.Document.Folder.Self.Path }
+```
+
+Take the last CLSID segment from the output and add it to the `(?:...)` list of `knownBad` in `IsExcludedPath`. (Pages auto-detected during a run still need to be added to this list to be skipped instantly after a restart.)
+
+To look up Control Panel item CLSIDs and their names:
+
+```powershell
+Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ControlPanel\NameSpace' | ForEach-Object { $guid = $_.PSChildName; $name = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\CLSID\$guid" -ErrorAction SilentlyContinue).'(default)'; "$guid  $name" }
+```
+
+### Known Limitations
+
+- The first time an unknown popup page is encountered, the main window gains an extra blank "Home" tab that must be closed manually; from the second time onward it no longer appears.
+- `BadPaths` (the runtime auto-detected list) is only valid for the current session. After restarting the script the page is detected again; pages you encounter often should be added to `knownBad` as described above.
+- During the 2-second grace period after a successful merge, manually opening another window for the **same path** may be mistaken for a "popup" — that window is closed and the path marked as unmergeable (very rare; restarting the script clears it).
+- If the very first window opened is the Control Panel home page, `CheckFirstWindow` downgrades it to a standalone window and the next folder window becomes the new main window.
+
+### Implementation Notes
+
+- Windows are hidden with `WinSetTransparent(0)` instead of being hidden, to avoid interference with `DetectHiddenWindows`.
+- `WaitForSameWindowCount` waits until the `Shell.Application.Windows` count matches the number of tab controls (ignoring excluded windows), so that `GetPath`/`OpenInNewTab` index into the correct shell window.
+- `MergeLock` ensures only one window is merged at a time — popup detection relies on window-list snapshots, and concurrent merges would interfere with each other.
+- The original window always stays transparently hidden before it is closed, so the 1-second popup detection and the 2-second grace period are invisible to the user.
