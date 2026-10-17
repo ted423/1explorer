@@ -2,8 +2,11 @@
 ; https://www.reddit.com/r/AutoHotkey/comments/1fvsm2y/force_windows_11_to_open_file_explorer_in_new_tab/
 ; 系统中文，控制面板显示不一样，改为按路径判断是否合并，不再依赖窗口文字（解决时序竞争）：
 ; - 控制面板主页 / 所有控制面板项：按完整路径排除
-; - 已知"导航会弹新窗口"的页（如 管理存储空间）：按末尾 CLSID 直接跳过
+; - 已知"导航会弹新窗口"的页（如 管理存储空间）：按末尾 CLSID 直接跳过（knownBad 名单）
+; - 已知可合并的页（如 网络和共享中心）：按末尾 CLSID 直通，跳过弹窗检测与宽限期（knownGood 名单）
 ; - 未知弹窗页：运行时自动识别（Navigate2 后检测新窗口），记入 BadPaths 本次运行内不再尝试
+; - 已成功合并（宽限期确认无弹窗）的路径记入 GoodPaths，本次运行内再次合并时跳过 1 秒弹窗检测与宽限期，立即关原窗口
+; - 路径先校验格式再使用，规避 ShellWindows 残留对象返回的垃圾串（如 "OleMainThreadWndClass ..."）
 ; - 读取路径或导航失败时恢复窗口显示，不再报错、不丢窗口
 ; - 附带修复：文件夹名称里含"控制面板"也能正常合并了
 ; 调试：右键托盘图标切"调试模式"，或带 --debug 参数启动；日志写入脚本同目录 1explorer_debug.log
@@ -19,6 +22,7 @@ class ForceOneExplorerWindow {
         this.pWinEventHook := CallbackCreate(ObjBindMethod(this, 'WinEventProc'),, 7)
         this.IgnoreWindows := Map()
         this.BadPaths := Map()      ; 实测无法在标签页打开的页（导航会弹新窗口），本次运行内不再尝试
+        this.GoodPaths := Map()     ; 宽限期确认无弹窗、已成功合并过的路径，再次合并时跳过宽限期
         this.PendingMerges := Map() ; path -> 等待"未弹窗"确认的原窗口 hwnd（宽限 2 秒后才关闭）
         this.MergeLock := false
         this.shellWindows := ComObject('Shell.Application').Windows
@@ -46,6 +50,7 @@ class ForceOneExplorerWindow {
     static GetPath(hwnd) {
         static IID_IShellBrowser := '{000214E2-0000-0000-C000-000000000046}'
         shellWindows := this.shellWindows
+        lastBad := ''
         this.WaitForSameWindowCount()
         try activeTab := ControlGetHwnd('ShellTabWindowClass1', hwnd)
         loop 20 {  ; 等待新窗口的 COM 对象就绪，最多约 2 秒
@@ -63,13 +68,26 @@ class ForceOneExplorerWindow {
                         path := w.Document.Folder.Self.Path
                     }
                 }
-                if path != ''
+                if this.IsValidPath(path)
                     return path
+                if path != ''
+                    lastBad := path
             }
             sleep 100
         }
-        this.Log('GetPath 超时，取不到路径 hwnd=' hwnd)
+        this.Log('GetPath 超时，取不到有效路径 hwnd=' hwnd '，最后读到：' lastBad)
         return ''
+    }
+
+    ; ShellWindows 里可能残留刚关闭窗口的对象：此时读 Document.Folder.Self.Path 会得到已释放内存里的垃圾串
+    ; （如 "OleMainThreadWndClass A2DD-08002B30309D}\::{...}"），必须校验后再用
+    static IsValidPath(path) {
+        if path = ''
+            return false
+        ; 虚拟路径（含 ::{父}\::{子} 复合路径）；具体是否存在交给后续 SHParseDisplayName 校验
+        if path ~= 'i)^::\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}'
+            return true
+        return FileExist(path) != ''
     }
 
     ; 只排除无法作为标签页打开的页：
@@ -79,6 +97,13 @@ class ForceOneExplorerWindow {
         static knownBad := '(?:F942C606-0914-47AB-BE56-1321B8035096)'  ; F942C606 = 管理存储空间
         return path ~= 'i)^::\{(?:26EE0668-A00A-44D7-9371-BEB064C98683|21EC2020-3AEA-1069-A2DD-08002B30309D)\}$'
             || path ~= 'i)::\{' knownBad '\}$'
+    }
+
+    ; 已知可合并的页（按末尾 CLSID 匹配，兼容不同入口的复合路径）：
+    ; 跳过弹窗检测与宽限期，导航成功后立即关闭原窗口
+    static IsKnownGoodPath(path) {
+        static knownGood := '(?:7007ACC7-3202-11D1-AAD2-00805FC1270E)'  ; 7007ACC7 = 网络和共享中心
+        return path ~= 'i)::\{' knownGood '\}$'
     }
 
     static MergeWindows() {
@@ -101,7 +126,7 @@ class ForceOneExplorerWindow {
             seen.Set(w.hwnd, 1)
             path := ''
             try path := w.Document.Folder.Self.Path
-            if path = '' || this.IsExcludedPath(path) {
+            if !this.IsValidPath(path) || this.IsExcludedPath(path) {
                 keep.Set(w.hwnd, 1)
                 this.Log('启动合并：保留独立窗口 hwnd=' w.hwnd ' path=' path)
                 continue
@@ -168,8 +193,12 @@ class ForceOneExplorerWindow {
         timeout := A_TickCount + 15000
         while this.MergeLock {  ; 一次只合并一个，弹出窗口检测依赖窗口列表快照
             sleep 50
-            if A_TickCount > timeout
-                break
+            if A_TickCount > timeout {
+                ; 上一个合并被卡住（如恰逢另一窗口创建，计数等待吃满超时），放弃本次合并而非无锁硬闯
+                this.Log('等合并锁超时，放弃合并并恢复窗口 hwnd=' hwnd)
+                this.RestoreWindow(hwnd)
+                return
+            }
         }
         if !WinExist(hwnd)
             return
@@ -182,11 +211,19 @@ class ForceOneExplorerWindow {
             return
         }
         if this.PendingMerges.Has(path) {
-            ; 上一次合并的页弹出了新窗口：该页无法在标签页原地打开
-            ; 关掉弹出的复制品，恢复原来的 Explorer 窗口（避免窗口"跑到控制面板"）
             orig := this.PendingMerges[path]
             this.PendingMerges.Delete(path)
+            if orig = 0 {
+                ; 已知可合并路径刚合并完（原窗口已提前关闭）：这是迟到弹窗的复制品，直接关掉
+                this.Log('迟到弹窗：已知可合并路径，关闭复制品 hwnd=' hwnd ' path=' path)
+                if WinExist(hwnd)
+                    WinClose(hwnd)
+                return
+            }
+            ; 上一次合并的页弹出了新窗口：该页无法在标签页原地打开
+            ; 关掉弹出的复制品，恢复原来的 Explorer 窗口（避免窗口"跑到控制面板"）
             this.BadPaths[path] := 1
+            this.GoodPaths.Delete(path)
             this.Log('迟到弹窗：关闭复制品 hwnd=' hwnd '，恢复原窗口 hwnd=' orig '；判定不可合并 path=' path '（可把末尾 CLSID 加入 knownBad）')
             if WinExist(hwnd)
                 WinClose(hwnd)
@@ -195,32 +232,46 @@ class ForceOneExplorerWindow {
         }
         spawned := 0
         ok := false
+        ; 已确认可合并（运行时验证过或静态 knownGood 名单）：跳过 1 秒弹窗检测和宽限期，立即关原窗口
+        isGood := this.GoodPaths.Has(path) || this.IsKnownGoodPath(path)
         this.MergeLock := true
         try {
             before := Map()
             for h in WinGetList('ahk_class CabinetWClass')
                 before[h] := 1
             ok := this.OpenInNewTab(path)
-            sleep 1000  ; 等可能弹出的新窗口（原窗口此时是隐藏的，用户无感知）
-            for h in WinGetList('ahk_class CabinetWClass') {
-                if !before.Has(h) && h != hwnd {
-                    spawned := h
-                    break
+            if ok && !isGood {
+                sleep 1000  ; 等可能弹出的新窗口（原窗口此时是隐藏的，用户无感知）
+                for h in WinGetList('ahk_class CabinetWClass') {
+                    if !before.Has(h) && h != hwnd {
+                        spawned := h
+                        break
+                    }
                 }
             }
         } finally {
             this.MergeLock := false
         }
         if ok && !spawned {
-            ; 暂不关闭原窗口：宽限 2 秒确认没有迟到的弹窗后，由 FinalizeMerge 关闭
-            this.PendingMerges[path] := hwnd
-            SetTimer(ObjBindMethod(this, 'FinalizeMerge', path), -2000)
-            this.Log('合并成功，宽限 2 秒后关闭原窗口 hwnd=' hwnd ' path=' path)
+            if isGood {
+                this.Log('合并成功（已知可合并，立即关闭原窗口）hwnd=' hwnd ' path=' path)
+                if WinExist(hwnd)
+                    WinClose(hwnd)
+                ; 原窗口已关，但仍留 2 秒记录：期间同路径迟到弹窗的复制品直接关掉（无需恢复）
+                this.PendingMerges[path] := 0
+                SetTimer(ObjBindMethod(this, 'FinalizeMerge', path), -2000)
+            } else {
+                ; 暂不关闭原窗口：宽限 2 秒确认没有迟到的弹窗后，由 FinalizeMerge 关闭
+                this.PendingMerges[path] := hwnd
+                SetTimer(ObjBindMethod(this, 'FinalizeMerge', path), -2000)
+                this.Log('合并成功，宽限 2 秒后关闭原窗口 hwnd=' hwnd ' path=' path)
+            }
             if WinExist(this.FirstWindow) && WinGetMinMax(this.FirstWindow) = -1
                 WinRestore(this.FirstWindow)
         } else {
             if spawned {
                 this.BadPaths[path] := 1
+                this.GoodPaths.Delete(path)
                 this.Log('导航弹出新窗口 hwnd=' spawned '；判定不可合并 path=' path '（可把末尾 CLSID 加入 knownBad）')
                 if WinExist(spawned)
                     WinClose(spawned)
@@ -244,9 +295,14 @@ class ForceOneExplorerWindow {
             return  ; 弹窗分支已处理
         hwnd := this.PendingMerges[path]
         this.PendingMerges.Delete(path)
-        this.Log('宽限期无弹窗，关闭原窗口 hwnd=' hwnd ' path=' path)
-        if WinExist(hwnd)
-            WinClose(hwnd)
+        this.GoodPaths[path] := 1  ; 已验证可合并，下次同路径跳过宽限期
+        if hwnd {  ; hwnd = 0 表示已知可合并路径：原窗口早已关闭，仅清理记录
+            this.Log('宽限期无弹窗，关闭原窗口 hwnd=' hwnd ' path=' path)
+            if WinExist(hwnd)
+                WinClose(hwnd)
+        } else {
+            this.Log('宽限期无弹窗（原窗口已提前关闭）path=' path)
+        }
     }
 
     ; 若 FirstWindow 本身是无法合并的页（如控制面板主页），改回独立窗口
