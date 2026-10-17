@@ -18,6 +18,14 @@ Windows 11 资源管理器多窗口自动合并为单窗口多标签页的 AutoH
 2. 双击 `1explorer.ahk` 运行；如需开机自启，放入 `shell:startup` 文件夹。
 3. 运行后：新打开的资源管理器窗口会自动合并为第一个窗口的标签页。
 
+### 调试模式
+
+排查问题（如某个窗口没被合并）时，可开启调试日志：
+
+- **开关**：右键托盘图标 → **调试模式** 切换；或带参数启动 `AutoHotkey64.exe 1explorer.ahk --debug`（从启动即记录）。
+- **输出**：追加写入脚本同目录的 `1explorer_debug.log`，同时输出到 `OutputDebug`（可用 DebugView 实时查看）。
+- **内容**：每个窗口的隐藏/合并/跳过及原因、各步失败点；某页因“导航弹出新窗口”被判定不可合并时，日志会打出完整路径，末尾 CLSID 可直接加入 `knownBad`。
+
 ### 工作原理
 
 通过 `SetWinEventHook` 监听 `CabinetWClass`（资源管理器窗口）的系统事件：
@@ -51,7 +59,7 @@ Windows 11 资源管理器多窗口自动合并为单窗口多标签页的 AutoH
 
 #### 如何添加新的已知弹窗页
 
-发现某个控制面板页不能合并时，先保持该窗口打开，用 PowerShell 查询其路径：
+发现某个控制面板页不能合并时，先保持该窗口打开，用 PowerShell 查询其路径（或者开启[调试模式](#中文)后打开该页，日志里会直接打出完整路径）：
 
 ```powershell
 (New-Object -ComObject Shell.Application).Windows() | ForEach-Object { $_.Document.Folder.Self.Path }
@@ -95,6 +103,14 @@ Based on the [original version](https://www.reddit.com/r/AutoHotkey/comments/1fv
 2. Double-click `1explorer.ahk` to run it. To start it automatically at login, place it in your `shell:startup` folder.
 3. Once running: newly opened File Explorer windows are automatically merged as tabs into the first window.
 
+### Debug Mode
+
+To troubleshoot (e.g. a window that won't merge), enable debug logging:
+
+- **Toggle**: right-click the tray icon → **调试模式**; or start with `AutoHotkey64.exe 1explorer.ahk --debug` to log from startup.
+- **Output**: appended to `1explorer_debug.log` next to the script, and also sent to `OutputDebug` (viewable live with DebugView).
+- **Content**: every window hide / merge / skip decision with its reason, plus failure points. When a page is rejected because navigation spawned a new window, the log prints its full path — copy the trailing CLSID into `knownBad`.
+
 ### How It Works
 
 It listens for system events on `CabinetWClass` (File Explorer windows) via `SetWinEventHook`:
@@ -128,7 +144,7 @@ All decisions are based on **paths**, never on window text. Window text is not y
 
 #### Adding a New Known Popup Page
 
-When you find a Control Panel page that cannot be merged, keep that window open and query its path with PowerShell:
+When you find a Control Panel page that cannot be merged, keep that window open and query its path with PowerShell (or enable [debug mode](#english) and open the page — the log prints its full path directly):
 
 ```powershell
 (New-Object -ComObject Shell.Application).Windows() | ForEach-Object { $_.Document.Folder.Self.Path }

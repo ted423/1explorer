@@ -6,6 +6,7 @@
 ; - 未知弹窗页：运行时自动识别（Navigate2 后检测新窗口），记入 BadPaths 本次运行内不再尝试
 ; - 读取路径或导航失败时恢复窗口显示，不再报错、不丢窗口
 ; - 附带修复：文件夹名称里含"控制面板"也能正常合并了
+; 调试：右键托盘图标切"调试模式"，或带 --debug 参数启动；日志写入脚本同目录 1explorer_debug.log
 Persistent
 
 ForceOneExplorerWindow()
@@ -21,6 +22,17 @@ class ForceOneExplorerWindow {
         this.PendingMerges := Map() ; path -> 等待"未弹窗"确认的原窗口 hwnd（宽限 2 秒后才关闭）
         this.MergeLock := false
         this.shellWindows := ComObject('Shell.Application').Windows
+        this.DebugLog := A_ScriptDir '\1explorer_debug.log'
+        this.DebugMode := false
+        for arg in A_Args {
+            if arg = '--debug' || arg = '/debug'
+                this.DebugMode := true
+        }
+        A_TrayMenu.Add()
+        A_TrayMenu.Add('调试模式', ObjBindMethod(this, 'ToggleDebug'))
+        if this.DebugMode
+            A_TrayMenu.Check('调试模式')
+        this.Log('脚本启动')
     }
 
     static Call() {
@@ -56,6 +68,7 @@ class ForceOneExplorerWindow {
             }
             sleep 100
         }
+        this.Log('GetPath 超时，取不到路径 hwnd=' hwnd)
         return ''
     }
 
@@ -73,6 +86,7 @@ class ForceOneExplorerWindow {
         if windows.Length = 0
             return
         this.FirstWindow := windows.RemoveAt(1)
+        this.Log('启动：主窗口 hwnd=' this.FirstWindow)
         if WinGetTransparent(this.FirstWindow) = 0 {
             WinSetTransparent("Off", this.FirstWindow)
         }
@@ -89,6 +103,7 @@ class ForceOneExplorerWindow {
             try path := w.Document.Folder.Self.Path
             if path = '' || this.IsExcludedPath(path) {
                 keep.Set(w.hwnd, 1)
+                this.Log('启动合并：保留独立窗口 hwnd=' w.hwnd ' path=' path)
                 continue
             }
             paths.push(path)
@@ -100,6 +115,7 @@ class ForceOneExplorerWindow {
             WinWaitClose(hwnd)
         }
         for path in paths {
+            this.Log('启动合并：新标签页打开 ' path)
             this.OpenInNewTab(path)
         }
     }
@@ -119,6 +135,7 @@ class ForceOneExplorerWindow {
                         if WinGetTransparent(ancestor) = '' {
                             ; Hide window as early as possible
                             WinSetTransparent(0, ancestor)
+                            this.Log('CREATE：隐藏新窗口 hwnd=' ancestor)
                         }
                     }
                 }
@@ -129,16 +146,20 @@ class ForceOneExplorerWindow {
                     if !WinExist(this.FirstWindow) {
                         this.FirstWindow := hwnd
                         WinSetTransparent('Off', hwnd)
+                        this.Log('SHOW：设为主窗口 hwnd=' hwnd)
                         SetTimer(() => this.CheckFirstWindow(hwnd), -1)
                         return
                     }
                     if WinGetTransparent(hwnd) = 0 {
+                        this.Log('SHOW：进入合并流程 hwnd=' hwnd)
                         SetTimer(() => this.MergeWindow(hwnd), -1)
                     }
                 }
             case 0x8001:  ; EVENT_OBJECT_DESTROY
-                if this.IgnoreWindows.Has(hwnd)
+                if this.IgnoreWindows.Has(hwnd) {
                     this.IgnoreWindows.Delete(hwnd)
+                    this.Log('DESTROY：清理忽略列表 hwnd=' hwnd)
+                }
         }
     }
 
@@ -152,8 +173,11 @@ class ForceOneExplorerWindow {
         }
         if !WinExist(hwnd)
             return
+        this.Log('开始合并 hwnd=' hwnd)
         path := this.GetPath(hwnd)
         if path = '' || this.IsExcludedPath(path) || this.BadPaths.Has(path) {
+            reason := path = '' ? '取不到路径' : this.IsExcludedPath(path) ? '排除列表' : 'BadPaths'
+            this.Log('跳过合并（' reason '）hwnd=' hwnd ' path=' path)
             this.RestoreWindow(hwnd)
             return
         }
@@ -163,6 +187,7 @@ class ForceOneExplorerWindow {
             orig := this.PendingMerges[path]
             this.PendingMerges.Delete(path)
             this.BadPaths[path] := 1
+            this.Log('迟到弹窗：关闭复制品 hwnd=' hwnd '，恢复原窗口 hwnd=' orig '；判定不可合并 path=' path '（可把末尾 CLSID 加入 knownBad）')
             if WinExist(hwnd)
                 WinClose(hwnd)
             this.RestoreWindow(orig)
@@ -190,13 +215,17 @@ class ForceOneExplorerWindow {
             ; 暂不关闭原窗口：宽限 2 秒确认没有迟到的弹窗后，由 FinalizeMerge 关闭
             this.PendingMerges[path] := hwnd
             SetTimer(ObjBindMethod(this, 'FinalizeMerge', path), -2000)
+            this.Log('合并成功，宽限 2 秒后关闭原窗口 hwnd=' hwnd ' path=' path)
             if WinExist(this.FirstWindow) && WinGetMinMax(this.FirstWindow) = -1
                 WinRestore(this.FirstWindow)
         } else {
             if spawned {
                 this.BadPaths[path] := 1
+                this.Log('导航弹出新窗口 hwnd=' spawned '；判定不可合并 path=' path '（可把末尾 CLSID 加入 knownBad）')
                 if WinExist(spawned)
                     WinClose(spawned)
+            } else {
+                this.Log('OpenInNewTab 失败 path=' path)
             }
             this.RestoreWindow(hwnd)
         }
@@ -204,6 +233,7 @@ class ForceOneExplorerWindow {
 
     static RestoreWindow(hwnd) {
         this.IgnoreWindows.Set(hwnd, 1)
+        this.Log('恢复窗口显示并忽略 hwnd=' hwnd)
         if WinExist(hwnd)
             WinSetTransparent('Off', hwnd)
     }
@@ -214,6 +244,7 @@ class ForceOneExplorerWindow {
             return  ; 弹窗分支已处理
         hwnd := this.PendingMerges[path]
         this.PendingMerges.Delete(path)
+        this.Log('宽限期无弹窗，关闭原窗口 hwnd=' hwnd ' path=' path)
         if WinExist(hwnd)
             WinClose(hwnd)
     }
@@ -225,9 +256,33 @@ class ForceOneExplorerWindow {
         path := this.GetPath(hwnd)
         if path = '' || this.IsExcludedPath(path) || this.BadPaths.Has(path) {
             this.IgnoreWindows.Set(hwnd, 1)
+            this.Log('主窗口不可合并，降级为独立窗口 hwnd=' hwnd ' path=' path)
             if hwnd = this.FirstWindow
                 this.FirstWindow := 0
         }
+    }
+
+    ; 调试模式：托盘菜单切换，或带 --debug 参数启动
+    static ToggleDebug(*) {
+        if this.DebugMode {
+            this.Log('=== 调试模式关闭 ===')
+            this.DebugMode := false
+            A_TrayMenu.Uncheck('调试模式')
+        } else {
+            this.DebugMode := true
+            A_TrayMenu.Check('调试模式')
+            this.Log('=== 调试模式开启 ===')
+            TrayTip('日志写入 ' this.DebugLog, '1explorer 调试模式已开启')
+        }
+    }
+
+    ; 调试日志：写脚本同目录的 1explorer_debug.log，同时输出到 OutputDebug（可用 DebugView 查看）
+    static Log(msg) {
+        if !this.DebugMode
+            return
+        line := FormatTime(, 'HH:mm:ss') '.' Format('{:03}', A_MSec) ' ' msg
+        OutputDebug('1explorer ' line)
+        try FileAppend(line '`n', this.DebugLog, 'UTF-8')
     }
 
     static WaitForSameWindowCount() {
@@ -256,8 +311,10 @@ class ForceOneExplorerWindow {
             if windowCount = expected
                 break
             sleep 50
-            if A_TickCount > timeout
+            if A_TickCount > timeout {
+                this.Log('WaitForSameWindowCount 超时：标签数=' windowCount ' shell窗口数=' expected)
                 break
+            }
         }
     }
 
@@ -272,8 +329,10 @@ class ForceOneExplorerWindow {
             if parsePath ~= 'i)^::{[0-9A-F-]+}$'
                 parsePath := 'shell:' parsePath
             ; SHParseDisplayName 也支持 ::{guid}\::{guid} 形式的复合路径（如"网络连接"）
-            if DllCall('shell32\SHParseDisplayName', 'wstr', parsePath, 'ptr', 0, 'ptr*', &PIDL, 'uint', 0, 'ptr', 0) != 0 || PIDL = 0
+            if DllCall('shell32\SHParseDisplayName', 'wstr', parsePath, 'ptr', 0, 'ptr*', &PIDL, 'uint', 0, 'ptr', 0) != 0 || PIDL = 0 {
+                this.Log('SHParseDisplayName 解析失败 path=' path)
                 return false
+            }
         }
         if !WinExist(this.FirstWindow) {
             if PIDL
@@ -290,6 +349,7 @@ class ForceOneExplorerWindow {
         while shellWindows.Count() = Count {
             sleep 50
             if A_TickCount > timeout {
+                this.Log('新建标签页超时 path=' path)
                 if PIDL
                     DllCall('ole32\CoTaskMemFree', 'ptr', PIDL)
                 return false
@@ -297,6 +357,7 @@ class ForceOneExplorerWindow {
         }
         try Item := shellWindows.Item(Count)
         if !IsSet(Item) {
+            this.Log('取不到新标签页对象 path=' path)
             if PIDL
                 DllCall('ole32\CoTaskMemFree', 'ptr', PIDL)
             return false
@@ -316,6 +377,7 @@ class ForceOneExplorerWindow {
             else
                 Item.Navigate2(path)
         } catch {
+            this.Log('Navigate2 失败 path=' path)
             success := false
         }
         if PIDL
