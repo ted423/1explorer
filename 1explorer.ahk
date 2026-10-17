@@ -1,7 +1,7 @@
 #Requires AutoHotkey v2.0
 ; https://www.reddit.com/r/AutoHotkey/comments/1fvsm2y/force_windows_11_to_open_file_explorer_in_new_tab/
 ; 系统中文，控制面板显示不一样，改为按路径判断是否合并，不再依赖窗口文字（解决时序竞争）：
-; - 控制面板主页 / 所有控制面板项：按末尾 CLSID 排除（兼容复合路径形式）
+; - 控制面板类别视图整族（::{26EE0668-…} 开头）与"所有控制面板项"：导航前直接排除
 ; - 已知"导航会弹新窗口"的页（如 管理存储空间）：按末尾 CLSID 直接跳过（knownBad 名单）
 ; - 已知可合并的页（如 网络和共享中心）：按末尾 CLSID 直通，跳过弹窗检测与宽限期（knownGood 名单）
 ; - 未知弹窗页：运行时自动识别（Navigate2 后检测新窗口），记入 BadPaths 本次运行内不再尝试
@@ -23,6 +23,8 @@ class ForceOneExplorerWindow {
         this.IgnoreWindows := Map()
         this.BadPaths := Map()      ; 实测无法在标签页打开的页（导航会弹新窗口），本次运行内不再尝试
         this.GoodPaths := Map()     ; 宽限期确认无弹窗、已成功合并过的路径，再次合并时跳过宽限期
+        this.LastTabItem := 0       ; 最近新建的标签页对象及导航前地址，合并失败时用于撤销导航
+        this.LastTabPrevURL := ''
         this.PendingMerges := Map() ; path -> 等待"未弹窗"确认的原窗口 hwnd（宽限 2 秒后才关闭）
         this.MergeLock := false
         this.shellWindows := ComObject('Shell.Application').Windows
@@ -90,16 +92,17 @@ class ForceOneExplorerWindow {
         return FileExist(path) != ''
     }
 
-    ; 只排除无法作为标签页打开的页（一律按 CLSID 匹配）：
-    ; 同一页从不同入口打开会返回复合路径（如 ::{26EE0668-…}\0\::{F942C606-…}），末尾 CLSID 才是当前页
-    ; - 控制面板主页 / 所有控制面板项：合并会把主窗口整个挪到"控制面板"任务栏图标下
-    ;   且类别视图会返回 ::{26EE0668-…}\0 这种"主页+数字段"形式（末尾不是 CLSID，需单独匹配）
-    ; - 已知"导航会弹新窗口"的页
+    ; 在导航之前就排除无法作为标签页打开的页（knownGood 直通优先）：
+    ; - 控制面板类别视图（::{26EE0668-…} 开头）：主页、::{26EE0668-…}\0、…\5\::{BitLocker} 等
+    ;   导航这类页会弹新窗口，并让主窗口整体被"挪到控制面板"任务栏分组，所以一律不试
+    ; - "所有控制面板项"（::{21EC2020-…} 结尾，含复合路径）
+    ; - 已知"导航会弹新窗口"的页（按末尾 CLSID，兼容不同入口）
     static IsExcludedPath(path) {
-        static knownBad := '(?:F942C606-0914-47AB-BE56-1321B8035096)'  ; F942C606 = 管理存储空间
-        static home := '(?:26EE0668-A00A-44D7-9371-BEB064C98683|21EC2020-3AEA-1069-A2DD-08002B30309D)'
-        return path ~= 'i)::\{' home '\}$'              ; 末尾 CLSID 是主页（含复合路径形式）
-            || path ~= 'i)^::\{' home '\}(?:\\[^\\]*)?$'  ; 主页 + 一段数字/类别（如 ::{26EE0668-…}\0）
+        static knownBad := '(?:F942C606-0914-47AB-BE56-1321B8035096|D9EF8727-CAC2-4E60-809E-86F80A666C91)'  ; F942C606=管理存储空间, D9EF8727=BitLocker 驱动器加密
+        if this.IsKnownGoodPath(path)  ; 白名单优先：确认可合并的页不受下面规则影响
+            return false
+        return path ~= 'i)^::\{26EE0668-A00A-44D7-9371-BEB064C98683\}'      ; 类别视图整族（含 \0、\5\::{…}）
+            || path ~= 'i)::\{21EC2020-3AEA-1069-A2DD-08002B30309D\}(?:\\[^\\]*)?$'
             || path ~= 'i)::\{' knownBad '\}$'
     }
 
@@ -284,6 +287,7 @@ class ForceOneExplorerWindow {
                 this.Log('导航弹出新窗口 hwnd=' spawned '；判定不可合并 path=' path '（可把末尾 CLSID 加入 knownBad）')
                 if WinExist(spawned)
                     WinClose(spawned)
+                this.UndoTab()  ; 撤销主窗口里新建标签页的导航，避免整个窗口被挪到"控制面板"任务栏分组
             } else {
                 this.Log('OpenInNewTab 失败 path=' path)
             }
@@ -296,6 +300,22 @@ class ForceOneExplorerWindow {
         this.Log('恢复窗口显示并忽略 hwnd=' hwnd)
         if WinExist(hwnd)
             WinSetTransparent('Off', hwnd)
+    }
+
+    ; 合并失败后把新建的标签页导航回导航前地址，撤销"整个主窗口被挪到控制面板"的副作用
+    static UndoTab() {
+        item := this.LastTabItem
+        url := this.LastTabPrevURL
+        this.LastTabItem := 0
+        this.LastTabPrevURL := ''
+        if !IsObject(item) || url = ''
+            return
+        try {
+            item.Navigate2(url)
+            this.Log('已撤销标签页导航，回到 ' url)
+        } catch {
+            this.Log('撤销标签页导航失败（多余标签页需手动关闭）')
+        }
     }
 
     ; 宽限期结束仍没弹窗：合并确认成功，关闭原窗口
@@ -405,6 +425,8 @@ class ForceOneExplorerWindow {
             return false
         }
         this.WaitForSameWindowCount()
+        this.LastTabItem := 0
+        this.LastTabPrevURL := ''
         hwnd := this.FirstWindow
         Count := shellWindows.Count()
         ; open a new tab (https://stackoverflow.com/a/78502949)
@@ -427,6 +449,9 @@ class ForceOneExplorerWindow {
                 DllCall('ole32\CoTaskMemFree', 'ptr', PIDL)
             return false
         }
+        ; 记下新建标签页及其导航前地址，导航失败时据此撤销（避免主窗口被"挪到控制面板"图标下）
+        this.LastTabItem := Item
+        try this.LastTabPrevURL := Item.LocationURL
         if PIDL {
             byteCount := DllCall('shell32\ILGetSize', 'ptr', PIDL, 'uint')
             SAFEARRAY := Buffer(16 + 2 * A_PtrSize, 0)
