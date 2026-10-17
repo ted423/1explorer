@@ -1,7 +1,7 @@
 #Requires AutoHotkey v2.0
 ; https://www.reddit.com/r/AutoHotkey/comments/1fvsm2y/force_windows_11_to_open_file_explorer_in_new_tab/
 ; 系统中文，控制面板显示不一样，改为按路径判断是否合并，不再依赖窗口文字（解决时序竞争）：
-; - 控制面板主页 / 所有控制面板项：按完整路径排除
+; - 控制面板主页 / 所有控制面板项：按末尾 CLSID 排除（兼容复合路径形式）
 ; - 已知"导航会弹新窗口"的页（如 管理存储空间）：按末尾 CLSID 直接跳过（knownBad 名单）
 ; - 已知可合并的页（如 网络和共享中心）：按末尾 CLSID 直通，跳过弹窗检测与宽限期（knownGood 名单）
 ; - 未知弹窗页：运行时自动识别（Navigate2 后检测新窗口），记入 BadPaths 本次运行内不再尝试
@@ -90,12 +90,16 @@ class ForceOneExplorerWindow {
         return FileExist(path) != ''
     }
 
-    ; 只排除无法作为标签页打开的页：
-    ; - 控制面板主页 / 所有控制面板项（完整路径匹配）
-    ; - 已知"导航会弹新窗口"的页（按末尾 CLSID 匹配，兼容不同入口的复合路径）
+    ; 只排除无法作为标签页打开的页（一律按 CLSID 匹配）：
+    ; 同一页从不同入口打开会返回复合路径（如 ::{26EE0668-…}\0\::{F942C606-…}），末尾 CLSID 才是当前页
+    ; - 控制面板主页 / 所有控制面板项：合并会把主窗口整个挪到"控制面板"任务栏图标下
+    ;   且类别视图会返回 ::{26EE0668-…}\0 这种"主页+数字段"形式（末尾不是 CLSID，需单独匹配）
+    ; - 已知"导航会弹新窗口"的页
     static IsExcludedPath(path) {
         static knownBad := '(?:F942C606-0914-47AB-BE56-1321B8035096)'  ; F942C606 = 管理存储空间
-        return path ~= 'i)^::\{(?:26EE0668-A00A-44D7-9371-BEB064C98683|21EC2020-3AEA-1069-A2DD-08002B30309D)\}$'
+        static home := '(?:26EE0668-A00A-44D7-9371-BEB064C98683|21EC2020-3AEA-1069-A2DD-08002B30309D)'
+        return path ~= 'i)::\{' home '\}$'              ; 末尾 CLSID 是主页（含复合路径形式）
+            || path ~= 'i)^::\{' home '\}(?:\\[^\\]*)?$'  ; 主页 + 一段数字/类别（如 ::{26EE0668-…}\0）
             || path ~= 'i)::\{' knownBad '\}$'
     }
 
@@ -134,8 +138,11 @@ class ForceOneExplorerWindow {
             paths.push(path)
         }
         for hwnd in windows {
-            if !seen.Has(hwnd) || keep.Has(hwnd)
+            if !seen.Has(hwnd) || keep.Has(hwnd) {
+                if WinGetTransparent(hwnd) = 0  ; 上次异常退出可能残留透明窗口，恢复显示
+                    WinSetTransparent('Off', hwnd)
                 continue  ; 读不到路径或不需要合并的窗口保持原样
+            }
             PostMessage(0x0112, 0xF060,,, hwnd)  ; 0x0112 = WM_SYSCOMMAND, 0xF060 = SC_CLOSE
             WinWaitClose(hwnd)
         }
@@ -223,7 +230,8 @@ class ForceOneExplorerWindow {
             ; 上一次合并的页弹出了新窗口：该页无法在标签页原地打开
             ; 关掉弹出的复制品，恢复原来的 Explorer 窗口（避免窗口"跑到控制面板"）
             this.BadPaths[path] := 1
-            this.GoodPaths.Delete(path)
+            if this.GoodPaths.Has(path)  ; Map.Delete 键不存在会抛异常
+                this.GoodPaths.Delete(path)
             this.Log('迟到弹窗：关闭复制品 hwnd=' hwnd '，恢复原窗口 hwnd=' orig '；判定不可合并 path=' path '（可把末尾 CLSID 加入 knownBad）')
             if WinExist(hwnd)
                 WinClose(hwnd)
@@ -271,7 +279,8 @@ class ForceOneExplorerWindow {
         } else {
             if spawned {
                 this.BadPaths[path] := 1
-                this.GoodPaths.Delete(path)
+                if this.GoodPaths.Has(path)  ; Map.Delete 键不存在会抛异常
+                    this.GoodPaths.Delete(path)
                 this.Log('导航弹出新窗口 hwnd=' spawned '；判定不可合并 path=' path '（可把末尾 CLSID 加入 knownBad）')
                 if WinExist(spawned)
                     WinClose(spawned)

@@ -52,7 +52,7 @@ Windows 11 资源管理器多窗口自动合并为单窗口多标签页的 AutoH
 
 判断一律基于**路径**而非窗口文字——窗口文字在 `EVENT_OBJECT_SHOW` 时尚未填充，存在时序竞争；且中文系统显示文本不同。附带好处：文件夹名称里含“控制面板”也能正常合并。
 
-1. **控制面板主页 / 所有控制面板项**：完整路径排除（`::{26EE0668-…}`、`::{21EC2020-…}`），保持独立窗口。
+1. **控制面板主页 / 所有控制面板项**：按末尾 CLSID 排除（`::{26EE0668-…}`、`::{21EC2020-…}`），保持独立窗口。同一页从不同入口打开会返回复合路径（如 `::{26EE0668-…}\0\::{21EC2020-…}`），末尾 CLSID 才是当前页——若用完整路径匹配会漏判，把主页合并进主窗口后整个窗口会"挪到控制面板"任务栏图标下。此外类别视图主页还会返回 `::{26EE0668-…}\0` 这种"主页 + 数字段"形式（末尾不是 CLSID），按"主页 CLSID + 单段后缀"单独匹配排除。
 2. **已知“导航会弹新窗口”的页**：按**末尾 CLSID** 匹配直接跳过（入口不同，复合路径的父 GUID 不同，故不匹配完整路径）。目前名单（`knownBad`）：
    - `{F942C606-0914-47AB-BE56-1321B8035096}` 管理存储空间
 3. **已知可合并的页**：同样按**末尾 CLSID** 匹配，跳过 1 秒弹窗检测和 2 秒宽限期，导航成功后立即关闭原窗口。目前名单（`knownGood`）：
@@ -140,7 +140,7 @@ If any step fails (path unavailable, parse failure, navigation failure, popup de
 
 All decisions are based on **paths**, never on window text. Window text is not yet populated when `EVENT_OBJECT_SHOW` fires (a race condition), and the displayed text differs on Chinese systems. A side benefit: folders whose names contain "Control Panel" now merge normally.
 
-1. **Control Panel home / All Control Panel Items**: excluded by full path (`::{26EE0668-…}`, `::{21EC2020-…}`); they remain standalone windows.
+1. **Control Panel home / All Control Panel Items**: excluded by trailing CLSID (`::{26EE0668-…}`, `::{21EC2020-…}`); they remain standalone windows. The same page opened from a different entry point can return a composite path (e.g. `::{26EE0668-…}\0\::{21EC2020-…}`) where the trailing CLSID is the actual current page — full-path matching would miss it, and merging the home page into the main window moves the entire window under the "Control Panel" taskbar icon. The category-view home may also return a "home + numeric segment" form like `::{26EE0668-…}\0` (no trailing CLSID), which is excluded via a separate "home CLSID + single suffix segment" match.
 2. **Known pages that pop up a new window**: matched by their **trailing CLSID** and skipped directly (the parent GUID in a composite path differs depending on the entry point, so full-path matching is not used). Current list (`knownBad`):
    - `{F942C606-0914-47AB-BE56-1321B8035096}` Manage Storage Spaces
 3. **Known mergeable pages**: also matched by their **trailing CLSID**; they skip the 1-second popup check and the 2-second grace period, and the original window is closed immediately after navigation. Current list (`knownGood`):
